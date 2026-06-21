@@ -5,7 +5,7 @@
 """
 
 from __future__ import annotations
-
+import logging
 import time
 from loguru import logger
 
@@ -25,11 +25,39 @@ class SupportAssistantApp:
         self.stats = SessionStats()
         self.cache = LLMCache()  # Локальный in-memory кеш
         self.client = RobustLLMClient(settings)
-
-        # Логирование только в файл (убираем дефолтный вывод в stderr)
+        # 1. Удаляем стандартный вывод loguru в терминал
         logger.remove()
-        logger.add(settings.log_path, format="{time} {message}", rotation="10 MB")
+        # 2. Настраиваем запись логов строго в файл
+        logger.add(
+            settings.log_path, 
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}", 
+            rotation="10 MB",
+            encoding="utf-8"
+        )
+        # 3. Перехватчик для стандартного модуля logging (httpx, openai)
+        class InterceptHandler(logging.Handler):
+            def emit(self, record):
+                try:
+                    level = logger.level(record.levelname).name
+                except ValueError:
+                    level = record.levelno
+                frame, depth = logging.currentframe(), 2
+                while frame.f_code.co_filename == logging.__file__:
+                    frame = frame.f_back
+                    depth += 1
+                logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
+        # Настраиваем корневой логгер Python на наш перехватчик
+        logging.root.handlers = [InterceptHandler()]
+        logging.root.setLevel(logging.INFO)
+
+        # Принудительно убираем вывод сетевых библиотек из консоли в файл
+        logging.getLogger("httpx").handlers = [InterceptHandler()]
+        logging.getLogger("httpx").setLevel(logging.INFO)
+        logging.getLogger("openai").handlers = [InterceptHandler()]
+        logging.getLogger("openai").setLevel(logging.INFO)
+        # ───────────────────────────────────────────────────────
+        
     def handle_command(self, command: str) -> str | None:
         if command == "/clear":
             self.history.clear()
@@ -46,7 +74,7 @@ class SupportAssistantApp:
             
         if command == "/stats":
             cache_info = self.cache.stats()
-            # Убрана метрика эскалаций из вывода статистики
+            
             return (
                 f"Запросов: {self.stats.total_queries} | "
                 f"LLM вызовов: {self.stats.llm_calls} | "
@@ -60,7 +88,7 @@ class SupportAssistantApp:
             return None
         return "Доступные команды: /clear, /clear_cache, /reset_stats, /stats, /quit"
 
-    def respond(self, user_message: str) -> AssistantResponse:
+    def respond(self, user_message: str, image_path: str | None = None) -> AssistantResponse:
         started_at = time.perf_counter()
         self.stats.total_queries += 1
 
@@ -82,10 +110,39 @@ class SupportAssistantApp:
                 used_fallback=False
             )
          # Собираем сообщения диалога, которые пойдут в LLM и в качестве ключа для кеша
-        messages = build_answer_messages(self.system_prompt, self.history, user_message)
+        messages = build_answer_messages(self.system_prompt, self.history, user_message,  image_path)
         # Определяем имя модели, которая будет опрашиваться (берём primary из настроек)
         model_name = self.settings.primary_model
         
+        
+        # 2. ПРОВЕРКА КЕША (Пропускаем, если отправлено изображение)
+        if not image_path:
+            try:
+                # Передаем все обязательные параметры для вашего SHA-256 кеша
+                cached = self.cache.get(model=model_name, messages=messages, temperature=0.2)
+                if cached is not None:
+                    self.stats.cache_hits += 1
+                    self._remember_turn(user_message, cached)
+                    latency = time.perf_counter() - started_at
+                    self._log(user_message, str(category), cached, 0, latency, True, "cache", "cache")
+                    return AssistantResponse(cached, category, True, latency, "cache", "cache", False)
+            except Exception as e:
+                logger.warning(f"Ошибка при чтении из кеша: {e}")
+        else:
+            logger.info("Обнаружено изображение в запросе. Пропускаю проверку кеша.")
+
+        # 3. ВЫЗОВ СИСТЕМЫ LLM (если в кеше пусто или отправлена картинка)
+        self.stats.cache_misses += 1
+        self.stats.llm_calls += 1
+        result = self.client.answer(messages)
+        
+        # СОХРАНЕНИЕ В КЕШ (Записываем только текстовые ответы без картинок)
+        if not image_path:
+            try:
+                self.cache.set(model=model_name, messages=messages, temperature=0.2, response=result.text)
+            except Exception as e:
+                logger.warning(f"Ошибка при записи в кеш: {e}")
+                
         # Проверяем локальный кеш
         try:
             cached = self.cache.get(model=model_name, messages=messages, temperature=0.2)
