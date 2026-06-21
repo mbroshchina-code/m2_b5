@@ -10,7 +10,7 @@ bag_assistant_cli/
     assistant.py          # сценарий диалога и команды CLI
     classification.py     # категории
   infrastructure/
-    cache.py              # In-memory кэш
+    cache.py              # In-memory кэш, пока не удалось установить Redis
     llm.py                # retry (tenacity) + fallback для LLM
   prompts/
     loader.py             # загрузка prompt-файлов
