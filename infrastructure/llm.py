@@ -11,7 +11,7 @@ import os
 from loguru import logger
 from openai import OpenAI, RateLimitError, APIStatusError,  DefaultHttpxClient
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-import httpx
+from typing import Any
 from m2_b5.config import Settings
 from m2_b5.models import Category, LLMResult
 from m2_b5.core.classification import heuristic_classify
@@ -64,7 +64,7 @@ class RobustLLMClient:
 
         return heuristic_classify(messages[-1]["content"])
 
-    def answer(self, messages: list[dict[str, str]]) -> LLMResult:
+    def answer(self, messages: list[dict[str, Any]]) -> LLMResult:
         """Получает ответ: primary → openrouter → fallback → заглушка."""
         # 1. Сначала проверяем категорию запроса
         try:
@@ -103,7 +103,7 @@ class RobustLLMClient:
     # ── Внутренние методы ─────────────────────────────────────────────
 
     def _answer_from(
-        self, client: OpenAI, model: str, messages: list[dict[str, str]],
+        self, client: OpenAI, model: str, messages: list[dict[str, Any]],
     ) -> tuple[str, int]:
         """Один ответ от провайдера. Возвращает (текст, токены)."""
         text = self._call(client, model, messages)
@@ -113,7 +113,7 @@ class RobustLLMClient:
         self,
         client: OpenAI,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 250,
     ) -> str:
